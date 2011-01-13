@@ -1,0 +1,164 @@
+
+* Files
+#+srcname: files
+#+begin_src sh
+ls eng-all/*.zip
+#+end_src
+
+#+results: files
+| eng-all/googlebooks-eng-all-1gram-20090715-0.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-1.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-2.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-3.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-4.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-5.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-6.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-7.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-8.csv.zip |
+| eng-all/googlebooks-eng-all-1gram-20090715-9.csv.zip |
+
+* Filter
+#+begin_src perl :tangle ng-filter.pl
+  while ( <> ) {
+      # print if /^[^0-9\$.#%\d!&<+?]+\t/;
+      print if /^[A-Za-z][a-z']*\t/;
+  }
+#+end_src
+
+#+begin_src sh :var files=files
+  for f in $files; do
+      zcat $f | perl ng-filter.pl > $f.filtered2
+      # perl -i ng-filter.pl $f
+  done
+#+end_src
+
+* Split
+#+begin_src perl :tangle split.pl
+  $OUTDIR = 'eng-all-split-clean';
+  while( <> ) {
+      ($ngram) = split '\t';
+      next unless $ngram =~ /^[A-Za-z][a-z']*$/;
+      if($ngram ne $ngram_old) {
+          $dir = substr($ngram, 0, 2);
+          close FILE if $ngram_old;
+          mkdir "$OUTDIR/$dir";
+          open FILE, ">$OUTDIR/$dir/$ngram";
+          $ngram_old = $ngram;
+      }
+      print FILE;
+  }
+#+end_src
+
+* Count total words
+#+begin_src perl :tangle count-words.pl
+  %counts = {};
+  while( <> ) {
+      ($ngram, $year, $count) =  split '\t';
+      $counts{$year} += $count;
+  }
+  while( ($key, $val) = each %counts ) {
+      print "$key\t$val\n" if $val;
+  }
+#+end_src
+
+#+begin_src perl :tangle test.pl
+  %h = {};
+  $h{'a'} = 1;
+  while( ($key, $val) = each %h ) {
+      print "$key -> $val\n";
+  }
+#+end_src
+
+* R
+#+begin_src R :session
+  dir <- "eng-all"
+  file <- "googlebooks-eng-all-1gram-20090715-0.csv.zip.filtered2"
+  # fh <- unz(sprintf("%s/%s.zip", dir, file), filename=file)
+  ng.read <- function(file)
+      read.delim(file, header=FALSE,
+                 colClasses=c("character", rep("integer", 4)),
+                 col.names=c("ngram","year", "match.count","page.count","volume.count"))
+  
+  read.ngrams <- function(dirs) {
+      paths <- list.files(dirs, full.names=TRUE)
+      ngg <- lapply(paths, ng.read, simplify=FALSE)
+      names(ngg) <- basename(paths)
+      ngg
+  }
+  
+  trim.ngrams <- function(ngrams, range=c(1800, 1950))
+      lapply(ngrams, function(ng)
+             ng[ng$year > min(range) & ng$year < max(range), ])
+  
+  plot.ngrams <- function(ngrams, outdir, year.range=c(1800, 1950),
+                          num.years.min=30, run.length.min=5,
+                          frequency.max.min=1e-7, frequency.min.min=0,
+                          column=c("match.count", "page.count", "volume.count"),
+                          totals.file="totals", verbose=TRUE) {
+  
+      ## Prepare stuff
+      if(missing(outdir)) { system("rm -rf temp/*") ; outdir <- "temp" }
+      if(!file.exists(outdir)) dir.create(outdir)
+      else if(length(list.files(outdir)) > 0)
+          stop("Output directory %s is not empty.", outdir)
+      column <- match.arg(column)
+      if(verbose) cat("Start:", length(ngrams), "ngrams\n")
+      
+      ## Read in year totals for rescaling
+      totals <- read.table(totals.file, col.names=c("year","count"))
+      totals <- structure(totals$count, names=totals$year)
+  
+      if(!is.null(year.range)) {
+          if(verbose) cat("Trimming data...")
+          ngrams <- trim.ngrams(ngrams, year.range)
+          if(verbose) cat("\n")
+      }
+  
+      ## Filter out ngrams that occur in too few years
+      ok <- sapply(ngrams, nrow) >= num.years.min
+      ngrams <- ngrams[ok]
+      if(verbose) cat("Removed", sum(!ok), "/", length(ok),
+                      "ngrams which occur in <",
+                      num.years.min, "years\n")
+      
+      ## Rescale from absolute per-year counts to proportions
+      rescale <- function(ng) {
+          stopifnot(as.character(ng$year) %in% names(totals))
+          ng[[column]] <- ng[[column]] / totals[as.character(ng$year)]
+          ng
+      }
+      ngrams <- lapply(ngrams, rescale)
+  
+      ## Filter out ngrams whose maximum frequency is too low
+      ok <- sapply(ngrams, function(ng) max(ng[[column]])) >= frequency.max.min
+      ngrams <- ngrams[ok]
+      if(verbose) cat("Removed", sum(!ok), "/", length(ok),
+                      "ngrams with max frequency <",
+                      frequency.max.min, "\n")
+  
+      ## Filter out ngrams whose minimum frequency is too low
+      ok <- sapply(ngrams, function(ng) min(ng[[column]])) >= frequency.min.min
+      ngrams <- ngrams[ok]
+      if(verbose) cat("Removed", sum(!ok), "/", length(ok),
+                      "ngrams with min frequency <",
+                      frequency.min.min, "\n")
+  
+      ok <- sapply(ngrams, function(ng) max(rle(diff(ng[[column]]) > 0)$lengths)) >= run.length.min
+      ngrams <- ngrams[ok]
+      if(verbose) cat("Removed", sum(!ok), "/", length(ok),
+                      "ngrams with max increase/decrease length <",
+                      run.length.min, "\n")
+      
+      if(verbose) cat("Creating", length(ngrams), "plots\n")
+      for(ngram in names(ngrams)) {
+          cat(sprintf("%s\r", ngram))
+          png(file=sprintf(file.path(outdir, sprintf("%s.png", ngram))))
+          counts <- ngrams[[ngram]][,c("year",column)]
+          plot(counts, type="l", main=ngram, xaxt="n")
+          decades <- counts$year[counts$year %% 10 == 0]
+          axis(side=1, at=decades, labels=decades, las=2)
+          dev.off()
+      }
+  }
+  
+#+end_src
